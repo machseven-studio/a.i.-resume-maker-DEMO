@@ -8,8 +8,7 @@
 require('dotenv').config();
 
 const express = require('express');
-const puppeteer = require('puppeteer-core');
-const chromium = require('@sparticuz/chromium');
+const puppeteer = require('puppeteer');
 const { GoogleGenAI } = require('@google/genai');
 
 const app = express();
@@ -24,16 +23,18 @@ app.use(express.json({ limit: '2mb' }));
 let browserPromise = null;
 async function getBrowser() {
   if (!browserPromise) {
-    const executablePath = await chromium.executablePath();
     browserPromise = puppeteer.launch({
+      headless: true,
       args: [
-        ...chromium.args,
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process'
       ],
-      executablePath,
-      headless: chromium.headless ?? 'shell',
     });
   }
   return browserPromise;
@@ -863,7 +864,7 @@ async function generatePdfBuffer(resume) {
   const browser = await getBrowser();
   const page = await browser.newPage();
   try {
-    await page.setContent(html, { waitUntil: 'networkidle0' });
+    await page.setContent(html, { waitUntil: 'domcontentloaded' });
     const pdfBuffer = await page.pdf({
       width: '210mm',
       height: '297mm',
@@ -919,7 +920,7 @@ app.post('/api/generate-resume', async (req, res) => {
     return res.send(pdfBuffer);
   } catch (err) {
     console.error('Error generating resume:', err);
-    return res.status(500).json({ error: 'Failed to generate resume. Please try again.' });
+    return res.status(500).json({ error: `Failed to generate resume: ${err.message}` });
   }
 });
 
