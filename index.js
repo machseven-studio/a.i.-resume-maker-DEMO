@@ -2,45 +2,6 @@
  * ============================================================================
  *  AI RESUME MAKER — DEMO EDITION — single-file Node.js + Express app
  *  (using Google's Gemini API — free tier, no credit card required)
- *
- *  This is the free/demo build: identical to the paid version, minus all
- *  Razorpay/payment logic. Filling the form and hitting the button generates
- *  the PDF immediately — no checkout, no payment verification, nothing to
- *  configure for money. Use this for showing off demo résumés or handing out
- *  freebies without touching your paid production app at all.
- * ============================================================================
- *
- *  SETUP (run these in your terminal, in an empty folder):
- *
- *    npm init -y
- *    npm install express puppeteer-core @sparticuz/chromium @google/genai dotenv
- *
- *  Then create a file called `.env` next to this file with:
- *
- *    AI_API_KEY=AIzaSyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
- *    PORT=3000
- *
- *  Get the Gemini key for free (no card needed) at https://aistudio.google.com/apikey
- *
- *  Then run:
- *
- *    node index.js
- *
- *  Open http://localhost:3000 in your browser.
- *
- *  NOTE ON RENDER DEPLOYMENT: this version uses @sparticuz/chromium, a
- *  compressed, pre-built Chromium binary bundled as a regular npm package —
- *  NOT the standard "puppeteer" package, which tries to separately download
- *  a full-size Chrome during the build step. That download step is what
- *  kept failing on Render's build container ("browser folder exists but
- *  executable is missing"). @sparticuz/chromium sidesteps the problem
- *  entirely: it ships the browser as part of `npm install`, no extra Build
- *  Command needed. On Render, your Build Command can simply be:
- *
- *    npm install
- *
- *  (No `npx puppeteer browsers install chrome` step required any more —
- *  remove it from your Render Build Command if it's still there.)
  * ============================================================================
  */
 
@@ -60,36 +21,24 @@ const genAI = new GoogleGenAI({
 
 app.use(express.json({ limit: '2mb' }));
 
-// NOTE: this is the free DEMO build — there is intentionally no pricing
-// constant and no payment client here. Every submission generates a PDF.
-
-// A shared Puppeteer browser instance so we're not launching a fresh Chrome
-// process on every single PDF request (slow + wasteful on Render's free tier).
-// Uses @sparticuz/chromium's bundled, pre-compressed Chromium binary — this
-// is what avoids the separate "download Chrome during build" step that kept
-// failing on Render.
 let browserPromise = null;
 async function getBrowser() {
   if (!browserPromise) {
-    // chromium.executablePath() returns a Promise in this version of
-    // @sparticuz/chromium — it must be awaited to get the real file path
-    // before handing it to Puppeteer. Passing the un-awaited Promise itself
-    // was the bug causing "Browser was not found at the configured
-    // executablePath ([object Promise])".
     const executablePath = await chromium.executablePath();
     browserPromise = puppeteer.launch({
-      args: chromium.args,
+      args: [
+        ...chromium.args,
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+      ],
       executablePath,
-      headless: chromium.headless,
+      headless: chromium.headless ?? 'shell',
     });
   }
   return browserPromise;
 }
 
-// ----------------------------------------------------------------------------
-// COMPREHENSIVE DEGREE LIST — used to populate the searchable qualifications
-// dropdown (Indian + International degrees).
-// ----------------------------------------------------------------------------
 const DEGREE_LIST = [
   'B.Tech (Bachelor of Technology)', 'M.Tech (Master of Technology)',
   'B.E. (Bachelor of Engineering)', 'M.E. (Master of Engineering)',
@@ -119,9 +68,6 @@ const DEGREE_LIST = [
   'DVM (Doctor of Veterinary Medicine)', 'DNB (Diplomate of National Board, Medical)',
 ];
 
-// ----------------------------------------------------------------------------
-// FRONTEND — one big HTML page, Tailwind via CDN, vanilla JS for the fetch call
-// ----------------------------------------------------------------------------
 const HTML_PAGE = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -217,10 +163,8 @@ const HTML_PAGE = `<!DOCTYPE html>
     animation-delay: 3s;
   }
 
-  /* Mandatory field star */
   .req-star { color: #C9A876; margin-left: 3px; font-weight: 700; }
 
-  /* Dynamic company card */
   .company-card { position: relative; }
   .remove-company-btn {
     position: absolute; top: 10px; right: 10px;
@@ -233,7 +177,6 @@ const HTML_PAGE = `<!DOCTYPE html>
 
   .field-error { border-color: #f87171 !important; }
 
-  /* Product Hunt badge */
   .ph-badge {
     display: inline-flex; align-items: center; gap: 6px;
     background: #F5EBE0; color: #4A1620;
@@ -247,10 +190,7 @@ const HTML_PAGE = `<!DOCTYPE html>
 
   <div class="max-w-3xl mx-auto px-6 py-14">
 
-    <!-- HERO / TAGLINE SECTION -->
     <div class="mb-14 text-center relative">
-
-      <!-- Product Hunt badge, visible corner of hero -->
       <div class="flex justify-center md:justify-end items-center gap-2 mb-4 flex-wrap">
         <span class="ph-badge">🏆 Featured on Product Hunt</span>
         <span class="ph-badge" style="background:#C9A876;">✨ Free Demo — No Payment Required</span>
@@ -290,7 +230,6 @@ const HTML_PAGE = `<!DOCTYPE html>
       <p class="italic text-parchment/70 text-base mt-3"><em>(as for the processing fee? well, it's cheaper than an energy drink.)</em></p>
     </div>
 
-    <!-- FORM CARD -->
     <div class="bg-wineLight/40 border border-hairline rounded-2xl p-8 shadow-2xl backdrop-blur-sm">
       <form id="resumeForm" class="space-y-6" novalidate>
 
@@ -333,7 +272,6 @@ const HTML_PAGE = `<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- Requirement 2: Mandatory searchable qualifications dropdown -->
         <div>
           <label class="block text-sm text-parchment/70 mb-1.5">Highest Qualification / Degree<span class="req-star">★</span></label>
           <input required name="degree" list="degreeOptions" autocomplete="off" placeholder="Start typing... e.g. B.Tech"
@@ -344,7 +282,6 @@ const HTML_PAGE = `<!DOCTYPE html>
           <p class="text-xs text-parchment/50 mt-1.5">Start typing to search — Indian &amp; international degrees supported.</p>
         </div>
 
-        <!-- Requirement 2: Dynamic Work Experience (optional overall) -->
         <div>
           <div class="flex items-center justify-between mb-2">
             <label class="block text-sm text-parchment/70">Work Experience <span class="text-parchment/40">(optional)</span></label>
@@ -366,7 +303,6 @@ const HTML_PAGE = `<!DOCTYPE html>
           <p class="text-xs text-parchment/50 mt-1.5">Dump it in plain English. We'll do the fancy talk for you.</p>
         </div>
 
-        <!-- Requirement 2: Extracurricular Achievements (optional) -->
         <div>
           <label class="block text-sm text-parchment/70 mb-1.5">
             Extracurricular Achievements &amp; Honors <span class="text-parchment/40">(optional)</span>
@@ -375,12 +311,10 @@ const HTML_PAGE = `<!DOCTYPE html>
             class="w-full bg-wine border border-hairline rounded-lg px-4 py-3 text-parchment glow-border outline-none"></textarea>
         </div>
 
-        <!-- PRE-GENERATE TAGLINE -->
         <div class="text-center font-display text-parchment leading-relaxed pt-2">
           <p class="text-lg mb-1">This is a <em>free demo</em> — generate your résumé instantly, no payment involved.</p>
         </div>
 
-        <!-- GENERATE PANEL (no payment — demo build) -->
         <div class="mt-4 rounded-2xl border border-hairline bg-wine/60 p-6">
           <div class="flex items-center justify-between mb-3 flex-wrap gap-3">
             <div>
@@ -488,13 +422,10 @@ const HTML_PAGE = `<!DOCTYPE html>
     el.classList.add('field-error');
   }
 
-  // Returns { valid: boolean, companies: [...] } and paints red borders on
-  // whatever is missing so the user actually knows what to fix.
   function validateForm() {
     clearFieldErrors();
     let valid = true;
 
-    // Standard required inputs (fullName, targetRole, email, degree, rawExperience)
     form.querySelectorAll('[required]').forEach((el) => {
       if (!el.value || !el.value.trim()) {
         valid = false;
@@ -502,8 +433,6 @@ const HTML_PAGE = `<!DOCTYPE html>
       }
     });
 
-    // Dynamic company cards: optional as a whole, but if a card exists,
-    // ALL THREE of its fields must be filled in.
     const companies = [];
     companiesContainer.querySelectorAll('.company-card').forEach((card) => {
       const companyName = card.querySelector('[data-field="companyName"]');
@@ -610,13 +539,6 @@ app.get('/', (req, res) => {
   res.type('html').send(HTML_PAGE);
 });
 
-// NOTE: this is the free DEMO build — there is intentionally no
-// /api/create-order route here. The paid production app has one; this one
-// doesn't need it since nothing is being charged.
-
-// ----------------------------------------------------------------------------
-// AI PROMPT LOGIC
-// ----------------------------------------------------------------------------
 const SYSTEM_PROMPT = `You are an elite executive résumé writer, trained in Oxford-level formal English, and an ATS (Applicant Tracking System) optimization specialist.
 
 You will be given a candidate's raw, plain-English notes about their work experience, along with their target role. Transform this into a polished, ATS-friendly résumé written in sophisticated, formal register — the kind of prose a top-tier executive search consultancy would produce.
@@ -713,7 +635,7 @@ function safeJSONParse(text) {
 
 async function generateResumeContent(formData) {
   const response = await genAI.models.generateContent({
-    model: 'gemini-3.6-flash',
+    model: 'gemini-2.5-flash',
     contents: [
       { role: 'user', parts: [{ text: buildUserPrompt(formData) }] },
     ],
@@ -730,15 +652,6 @@ async function generateResumeContent(formData) {
 
   return safeJSONParse(text);
 }
-
-// NOTE: this is the free DEMO build — there is intentionally no payment
-// signature verification here. Every valid form submission goes straight
-// through to PDF generation.
-
-// ----------------------------------------------------------------------------
-// PDF RENDERING — Requirement 3: full-bleed A4, two-column executive layout,
-// cream background, via Puppeteer (renders real HTML/CSS, then prints to PDF).
-// ----------------------------------------------------------------------------
 
 function escapeHtml(str) {
   if (str === null || str === undefined) return '';
@@ -963,9 +876,6 @@ async function generatePdfBuffer(resume) {
   }
 }
 
-// ----------------------------------------------------------------------------
-// ROUTE: /api/generate-resume
-// ----------------------------------------------------------------------------
 app.post('/api/generate-resume', async (req, res) => {
   try {
     const body = req.body || {};
@@ -974,8 +884,6 @@ app.post('/api/generate-resume', async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields.' });
     }
 
-    // Server-side validation of dynamic company entries: if any company
-    // object is present, all three of its sub-fields must be non-empty.
     if (Array.isArray(body.companies)) {
       for (const c of body.companies) {
         if (!c || !c.companyName || !c.jobTitle || !c.dateWindow) {
@@ -983,9 +891,6 @@ app.post('/api/generate-resume', async (req, res) => {
         }
       }
     }
-
-    // NOTE: demo build — no payment check here. Any well-formed request
-    // goes straight through to resume generation.
 
     if (!process.env.AI_API_KEY) {
       return res.status(500).json({ error: 'Server misconfiguration: AI_API_KEY is not set.' });
