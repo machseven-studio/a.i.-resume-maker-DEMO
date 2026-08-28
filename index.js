@@ -32,9 +32,18 @@ async function getBrowser() {
         '--disable-accelerated-2d-canvas',
         '--disable-gpu',
         '--no-first-run',
-        '--no-zygote',
-        '--single-process'
       ],
+    }).then((browser) => {
+      // If Chrome crashes mid-flight, drop the cached instance so the
+      // next request launches a fresh one instead of retrying a dead browser.
+      browser.on('disconnected', () => {
+        browserPromise = null;
+      });
+      return browser;
+    }).catch((err) => {
+      // Don't leave a rejected promise cached forever - let the next request retry.
+      browserPromise = null;
+      throw err;
     });
   }
   return browserPromise;
@@ -859,21 +868,32 @@ function buildResumeHtml(resume) {
 </html>`;
 }
 
-async function generatePdfBuffer(resume) {
-  const html = buildResumeHtml(resume);
+async function renderPdfWithBrowser(html) {
   const browser = await getBrowser();
   const page = await browser.newPage();
   try {
     await page.setContent(html, { waitUntil: 'domcontentloaded' });
-    const pdfBuffer = await page.pdf({
+    return await page.pdf({
       width: '210mm',
       height: '297mm',
       printBackground: true,
       margin: { top: 0, bottom: 0, left: 0, right: 0 },
     });
-    return pdfBuffer;
   } finally {
-    await page.close();
+    await page.close().catch(() => {});
+  }
+}
+
+async function generatePdfBuffer(resume) {
+  const html = buildResumeHtml(resume);
+  try {
+    return await renderPdfWithBrowser(html);
+  } catch (err) {
+    // First attempt after a cold start / crashed Chrome can fail - retry once
+    // with a freshly launched browser before giving up.
+    console.error('PDF render failed, retrying with a fresh browser:', err.message);
+    browserPromise = null;
+    return await renderPdfWithBrowser(html);
   }
 }
 
