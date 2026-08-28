@@ -4,7 +4,8 @@
   "description": "AI Resume Maker - Express server with Puppeteer PDF generation",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "postinstall": "npx puppeteer browsers install chrome"
   },
   "dependencies": {
     "@google/genai": "^1.0.0",
