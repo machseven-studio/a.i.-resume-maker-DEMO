@@ -2,13 +2,14 @@
  * ============================================================================
  *  AI RESUME MAKER — DEMO EDITION — single-file Node.js + Express app
  *  (using Google's Gemini API — free tier, no credit card required)
+ *  PDF rendering: PDFKit (no headless browser required)
  * ============================================================================
  */
 
 require('dotenv').config();
 
 const express = require('express');
-const puppeteer = require('puppeteer');
+const PDFDocument = require('pdfkit');
 const { GoogleGenAI } = require('@google/genai');
 
 const app = express();
@@ -19,35 +20,6 @@ const genAI = new GoogleGenAI({
 });
 
 app.use(express.json({ limit: '2mb' }));
-
-let browserPromise = null;
-async function getBrowser() {
-  if (!browserPromise) {
-    browserPromise = puppeteer.launch({
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--disable-gpu',
-        '--no-first-run',
-      ],
-    }).then((browser) => {
-      // If Chrome crashes mid-flight, drop the cached instance so the
-      // next request launches a fresh one instead of retrying a dead browser.
-      browser.on('disconnected', () => {
-        browserPromise = null;
-      });
-      return browser;
-    }).catch((err) => {
-      // Don't leave a rejected promise cached forever - let the next request retry.
-      browserPromise = null;
-      throw err;
-    });
-  }
-  return browserPromise;
-}
 
 const DEGREE_LIST = [
   'B.Tech (Bachelor of Technology)', 'M.Tech (Master of Technology)',
@@ -663,16 +635,119 @@ async function generateResumeContent(formData) {
   return safeJSONParse(text);
 }
 
-function escapeHtml(str) {
-  if (str === null || str === undefined) return '';
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+/* ============================================================================
+ * PDF RENDERING — PDFKit, two-panel layout (sidebar + main), drawn directly.
+ * No headless browser, no external binary downloads, nothing to break on
+ * Render's build servers.
+ * ============================================================================
+ */
+
+const MM = 2.8346456693; // points per millimetre (A4 = 210mm x 297mm = 595.28 x 841.89 pt)
+
+function mm(v) {
+  return v * MM;
 }
 
-function buildResumeHtml(resume) {
+function drawSectionTitle(doc, text, x, y, width, opts) {
+  const titleColor = opts.titleColor || '#A5824F';
+  const lineColor = opts.lineColor || '#C9A876';
+  const fontSize = opts.fontSize || 11;
+
+  doc.font('Times-Bold').fontSize(fontSize).fillColor(titleColor);
+  const upper = text.toUpperCase();
+  const textOpts = { width, characterSpacing: 1.2 };
+  doc.text(upper, x, y, textOpts);
+  const h = doc.heightOfString(upper, textOpts);
+  const lineY = y + h + mm(1);
+  doc.moveTo(x, lineY).lineTo(x + width, lineY).lineWidth(1).strokeColor(lineColor).stroke();
+  return lineY + mm(3.5);
+}
+
+function drawBullets(doc, items, x, y, width, opts) {
+  const size = opts.size || 9.6;
+  const color = opts.color || '#3A3226';
+  const bulletGap = mm(3.5);
+  const indent = mm(3.5);
+  let cursorY = y;
+
+  doc.font('Times-Roman').fontSize(size).fillColor(color);
+
+  items.forEach((item) => {
+    if (!item) return;
+    const textOpts = { width: width - indent, lineGap: 1.2 };
+    doc.text('•', x, cursorY, { width: indent });
+    doc.text(item, x + indent, cursorY, textOpts);
+    const h = doc.heightOfString(item, textOpts);
+    cursorY += h + mm(1.2);
+  });
+
+  return cursorY + (bulletGap - mm(1.2));
+}
+
+function drawSkillChips(doc, skills, x, y, maxWidth) {
+  const size = 8.3;
+  const paddingX = mm(2.1);
+  const chipHeight = mm(5.5);
+  const gap = mm(1.5);
+
+  doc.font('Times-Roman').fontSize(size);
+
+  let cursorX = x;
+  let cursorY = y;
+
+  skills.forEach((skill) => {
+    if (!skill) return;
+    const textWidth = doc.widthOfString(skill);
+    const chipWidth = textWidth + paddingX * 2;
+
+    if (cursorX !== x && cursorX + chipWidth > x + maxWidth) {
+      cursorX = x;
+      cursorY += chipHeight + gap;
+    }
+
+    doc.roundedRect(cursorX, cursorY, chipWidth, chipHeight, chipHeight / 2).fill('#E8D9BC');
+    doc.fillColor('#3A3226').text(skill, cursorX + paddingX, cursorY + chipHeight / 2 - size / 2 - 1, {
+      lineBreak: false,
+      width: textWidth + 2,
+    });
+
+    cursorX += chipWidth + gap;
+  });
+
+  return cursorY + chipHeight;
+}
+
+function drawResumePdf(doc, resume) {
+  const PAGE_W = doc.page.width;
+  const PAGE_H = doc.page.height;
+  const SIDEBAR_W = PAGE_W * 0.34;
+  const MAIN_X = SIDEBAR_W;
+  const MAIN_W = PAGE_W - SIDEBAR_W;
+
+  // Backgrounds — main page, sidebar block, hairline divider
+  doc.rect(0, 0, PAGE_W, PAGE_H).fill('#FDFBF7');
+  doc.rect(0, 0, SIDEBAR_W, PAGE_H).fill('#F1E7D6');
+  doc.moveTo(SIDEBAR_W, 0).lineTo(SIDEBAR_W, PAGE_H).lineWidth(1).strokeColor('#D9C6A3').stroke();
+
+  const sbX = mm(10);
+  const sbW = SIDEBAR_W - mm(10) - mm(8);
+  const mnX = MAIN_X + mm(10);
+  const mnW = MAIN_W - mm(10) - mm(12);
+
+  let sbY = mm(16);
+  let mnY = mm(16);
+
+  // ---- SIDEBAR ----
+  doc.font('Times-Bold').fontSize(20).fillColor('#2A2018');
+  const name = resume.name || '';
+  doc.text(name, sbX, sbY, { width: sbW });
+  sbY += doc.heightOfString(name, { width: sbW }) + mm(1);
+
+  doc.font('Times-Italic').fontSize(11.5).fillColor('#A5824F');
+  const targetRole = resume.targetRole || '';
+  doc.text(targetRole, sbX, sbY, { width: sbW });
+  sbY += doc.heightOfString(targetRole, { width: sbW }) + mm(8);
+
   const contactLines = [
     resume.contact?.email,
     resume.contact?.phone,
@@ -680,221 +755,91 @@ function buildResumeHtml(resume) {
     resume.contact?.linkedin,
   ].filter(Boolean);
 
-  const skillsHtml = (resume.skills || [])
-    .map((s) => `<span class="skill-chip">${escapeHtml(s)}</span>`)
-    .join('');
-
-  const educationHtml = (resume.education || [])
-    .map(
-      (edu) => `
-      <div class="edu-item">
-        <div class="edu-degree">${escapeHtml(edu.degree)}</div>
-        <div class="edu-meta">${[edu.institution, edu.dates].filter(Boolean).map(escapeHtml).join(' &middot; ')}</div>
-      </div>`
-    )
-    .join('');
-
-  const experienceHtml = (resume.experience || [])
-    .map((job) => {
-      const orgLine = [job.org, job.dates].filter(Boolean).map(escapeHtml).join('   |   ');
-      const bullets = (job.bullets || [])
-        .map((b) => `<li>${escapeHtml(b)}</li>`)
-        .join('');
-      return `
-      <div class="exp-item">
-        <div class="exp-title">${escapeHtml(job.title || 'Role')}</div>
-        ${orgLine ? `<div class="exp-org">${orgLine}</div>` : ''}
-        <ul class="exp-bullets">${bullets}</ul>
-      </div>`;
-    })
-    .join('');
-
-  const achievementsHtml = (resume.achievements || []).length
-    ? `
-      <div class="section">
-        <div class="section-title">Achievements</div>
-        <ul class="achievement-bullets">
-          ${(resume.achievements || []).map((a) => `<li>${escapeHtml(a)}</li>`).join('')}
-        </ul>
-      </div>`
-    : '';
-
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8" />
-<style>
-  @page { size: 210mm 297mm; margin: 0; }
-  * { box-sizing: border-box; }
-  html, body {
-    margin: 0; padding: 0;
-    width: 210mm; height: 297mm;
-    font-family: 'Georgia', 'Times New Roman', serif;
-    background: #FDFBF7;
-    background-image:
-      radial-gradient(circle at 15% 20%, rgba(165,130,79,0.05) 0%, transparent 45%),
-      radial-gradient(circle at 85% 80%, rgba(165,130,79,0.05) 0%, transparent 45%);
-  }
-  .page {
-    width: 210mm;
-    height: 297mm;
-    display: flex;
-  }
-  .sidebar {
-    width: 34%;
-    height: 297mm;
-    background: #F1E7D6;
-    border-right: 1px solid #D9C6A3;
-    padding: 16mm 8mm 12mm 10mm;
-    display: flex;
-    flex-direction: column;
-  }
-  .main {
-    width: 66%;
-    height: 297mm;
-    padding: 16mm 12mm 12mm 10mm;
-    display: flex;
-    flex-direction: column;
-  }
-  .name {
-    font-size: 22pt;
-    font-weight: bold;
-    color: #2A2018;
-    line-height: 1.15;
-    margin-bottom: 3mm;
-  }
-  .target-role {
-    font-size: 11.5pt;
-    color: #A5824F;
-    font-style: italic;
-    margin-bottom: 8mm;
-  }
-  .sidebar .block { margin-bottom: 8mm; }
-  .sidebar .block-title {
-    font-size: 10pt;
-    text-transform: uppercase;
-    letter-spacing: 1.5px;
-    color: #A5824F;
-    border-bottom: 1px solid #C9A876;
-    padding-bottom: 2mm;
-    margin-bottom: 3mm;
-    font-weight: bold;
-  }
-  .contact-line {
-    font-size: 8.8pt;
-    color: #4A4030;
-    margin-bottom: 1.6mm;
-    word-break: break-word;
-  }
-  .edu-item { margin-bottom: 3.5mm; }
-  .edu-degree { font-size: 9.5pt; font-weight: bold; color: #2A2018; }
-  .edu-meta { font-size: 8.3pt; color: #6B5F4F; }
-  .skill-chip {
-    display: inline-block;
-    font-size: 8.3pt;
-    background: #E8D9BC;
-    color: #3A3226;
-    border-radius: 3mm;
-    padding: 1.2mm 3mm;
-    margin: 0 1.5mm 1.5mm 0;
-  }
-  .section { margin-bottom: 7mm; }
-  .section-title {
-    font-size: 11.5pt;
-    text-transform: uppercase;
-    letter-spacing: 1.5px;
-    color: #A5824F;
-    border-bottom: 1.2px solid #C9A876;
-    padding-bottom: 2mm;
-    margin-bottom: 3.5mm;
-    font-weight: bold;
-  }
-  .summary-text {
-    font-size: 10pt;
-    line-height: 1.5;
-    color: #3A3226;
-  }
-  .exp-item { margin-bottom: 5.5mm; }
-  .exp-title { font-size: 10.8pt; font-weight: bold; color: #2A2018; }
-  .exp-org { font-size: 9pt; color: #6B5F4F; margin-bottom: 1.5mm; }
-  .exp-bullets, .achievement-bullets {
-    margin: 0; padding-left: 4mm;
-    font-size: 9.6pt; color: #3A3226; line-height: 1.45;
-  }
-  .exp-bullets li, .achievement-bullets li { margin-bottom: 1.3mm; }
-</style>
-</head>
-<body>
-  <div class="page">
-    <div class="sidebar">
-      <div class="name">${escapeHtml(resume.name)}</div>
-      <div class="target-role">${escapeHtml(resume.targetRole)}</div>
-
-      <div class="block">
-        <div class="block-title">Contact</div>
-        ${contactLines.map((c) => `<div class="contact-line">${escapeHtml(c)}</div>`).join('')}
-      </div>
-
-      ${
-        educationHtml
-          ? `<div class="block"><div class="block-title">Education</div>${educationHtml}</div>`
-          : ''
-      }
-
-      ${
-        skillsHtml
-          ? `<div class="block"><div class="block-title">Skills</div><div>${skillsHtml}</div></div>`
-          : ''
-      }
-    </div>
-
-    <div class="main">
-      ${
-        resume.summary
-          ? `<div class="section"><div class="section-title">Summary</div><div class="summary-text">${escapeHtml(resume.summary)}</div></div>`
-          : ''
-      }
-
-      ${
-        experienceHtml
-          ? `<div class="section"><div class="section-title">Experience</div>${experienceHtml}</div>`
-          : ''
-      }
-
-      ${achievementsHtml}
-    </div>
-  </div>
-</body>
-</html>`;
-}
-
-async function renderPdfWithBrowser(html) {
-  const browser = await getBrowser();
-  const page = await browser.newPage();
-  try {
-    await page.setContent(html, { waitUntil: 'domcontentloaded' });
-    return await page.pdf({
-      width: '210mm',
-      height: '297mm',
-      printBackground: true,
-      margin: { top: 0, bottom: 0, left: 0, right: 0 },
+  if (contactLines.length) {
+    sbY = drawSectionTitle(doc, 'Contact', sbX, sbY, sbW, {});
+    doc.font('Times-Roman').fontSize(8.8).fillColor('#4A4030');
+    contactLines.forEach((line) => {
+      doc.text(line, sbX, sbY, { width: sbW });
+      sbY += doc.heightOfString(line, { width: sbW }) + mm(0.6);
     });
-  } finally {
-    await page.close().catch(() => {});
+    sbY += mm(6);
+  }
+
+  if (resume.education && resume.education.length) {
+    sbY = drawSectionTitle(doc, 'Education', sbX, sbY, sbW, {});
+    resume.education.forEach((edu) => {
+      doc.font('Times-Bold').fontSize(9.5).fillColor('#2A2018');
+      doc.text(edu.degree || '', sbX, sbY, { width: sbW });
+      sbY += doc.heightOfString(edu.degree || '', { width: sbW }) + mm(0.5);
+
+      const meta = [edu.institution, edu.dates].filter(Boolean).join('  •  ');
+      if (meta) {
+        doc.font('Times-Roman').fontSize(8.3).fillColor('#6B5F4F');
+        doc.text(meta, sbX, sbY, { width: sbW });
+        sbY += doc.heightOfString(meta, { width: sbW }) + mm(0.5);
+      }
+      sbY += mm(1.2);
+    });
+    sbY += mm(4);
+  }
+
+  if (resume.skills && resume.skills.length) {
+    sbY = drawSectionTitle(doc, 'Skills', sbX, sbY, sbW, {});
+    sbY = drawSkillChips(doc, resume.skills, sbX, sbY, sbW) + mm(4);
+  }
+
+  // ---- MAIN ----
+  if (resume.summary) {
+    mnY = drawSectionTitle(doc, 'Summary', mnX, mnY, mnW, { fontSize: 11.5 });
+    doc.font('Times-Roman').fontSize(10).fillColor('#3A3226');
+    doc.text(resume.summary, mnX, mnY, { width: mnW, lineGap: 2 });
+    mnY += doc.heightOfString(resume.summary, { width: mnW, lineGap: 2 }) + mm(7);
+  }
+
+  if (resume.experience && resume.experience.length) {
+    mnY = drawSectionTitle(doc, 'Experience', mnX, mnY, mnW, { fontSize: 11.5 });
+    resume.experience.forEach((job) => {
+      doc.font('Times-Bold').fontSize(10.8).fillColor('#2A2018');
+      const title = job.title || 'Role';
+      doc.text(title, mnX, mnY, { width: mnW });
+      mnY += doc.heightOfString(title, { width: mnW }) + mm(0.6);
+
+      const orgLine = [job.org, job.dates].filter(Boolean).join('   |   ');
+      if (orgLine) {
+        doc.font('Times-Roman').fontSize(9).fillColor('#6B5F4F');
+        doc.text(orgLine, mnX, mnY, { width: mnW });
+        mnY += doc.heightOfString(orgLine, { width: mnW }) + mm(1.2);
+      }
+
+      if (job.bullets && job.bullets.length) {
+        mnY = drawBullets(doc, job.bullets, mnX, mnY, mnW, {});
+      }
+      mnY += mm(3.5);
+    });
+  }
+
+  if (resume.achievements && resume.achievements.length) {
+    mnY = drawSectionTitle(doc, 'Achievements', mnX, mnY, mnW, { fontSize: 11.5 });
+    drawBullets(doc, resume.achievements, mnX, mnY, mnW, {});
   }
 }
 
-async function generatePdfBuffer(resume) {
-  const html = buildResumeHtml(resume);
-  try {
-    return await renderPdfWithBrowser(html);
-  } catch (err) {
-    // First attempt after a cold start / crashed Chrome can fail - retry once
-    // with a freshly launched browser before giving up.
-    console.error('PDF render failed, retrying with a fresh browser:', err.message);
-    browserPromise = null;
-    return await renderPdfWithBrowser(html);
-  }
+function generatePdfBuffer(resume) {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ size: 'A4', margin: 0, autoFirstPage: true, bufferPages: true });
+      const chunks = [];
+      doc.on('data', (chunk) => chunks.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      drawResumePdf(doc, resume);
+
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
 }
 
 app.post('/api/generate-resume', async (req, res) => {
